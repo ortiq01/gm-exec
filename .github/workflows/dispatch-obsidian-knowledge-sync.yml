@@ -1,0 +1,74 @@
+name: dispatch-obsidian-knowledge-sync
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.md'
+      - '**/*.yml'
+      - '**/*.yaml'
+      - '**/*.json'
+      - '**/*.sh'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Build changed file list
+        id: changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "changed_files=manual dispatch" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          BEFORE="${{ github.event.before }}"
+          AFTER="${{ github.sha }}"
+          if [[ -z "$BEFORE" || "$BEFORE" == "0000000000000000000000000000000000000000" ]]; then
+            CHANGED=$(git diff-tree --no-commit-id --name-only -r "$AFTER" | tr '\n' '\r')
+          else
+            CHANGED=$(git diff --name-only "$BEFORE" "$AFTER" | tr '\n' '\r')
+          fi
+          CHANGED=${CHANGED//$'\r'/$'\n'}
+          {
+            echo "changed_files<<EOF"
+            echo "$CHANGED"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch to Obsidian-vaults
+        env:
+          GH_TOKEN: ${{ secrets.OBSIDIAN_VAULTS_PAT }}
+          SOURCE_REPO: ${{ github.repository }}
+          SOURCE_REF: ${{ github.sha }}
+          CHANGED_FILES: ${{ steps.changes.outputs.changed_files }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "Missing required secret: OBSIDIAN_VAULTS_PAT"
+            exit 1
+          fi
+
+          jq -n \
+            --arg event_type "source_repo_update" \
+            --arg source_repo "$SOURCE_REPO" \
+            --arg source_ref "$SOURCE_REF" \
+            --arg changed_files "$CHANGED_FILES" \
+            '{event_type: $event_type, client_payload: {source_repo: $source_repo, source_ref: $source_ref, changed_files: $changed_files}}' \
+            > payload.json
+
+          curl -sS -X POST \
+            -H "Authorization: token ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/ortiq01/Obsidian-vaults/dispatches \
+            -d @payload.json
+
+          echo "Dispatch sent to ortiq01/Obsidian-vaults"
